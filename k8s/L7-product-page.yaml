@@ -1,0 +1,19 @@
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: productpage-viewer
+  namespace: bookinfo
+spec:
+  targetRefs:
+    - kind: Service
+      group: ''
+      name: productpage
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/bar/sa/curl
+      to:
+        - operation:
+            methods: ['GET']

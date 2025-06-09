@@ -1956,33 +1956,184 @@ In a service mesh, this ensures only trusted services communicate with each othe
 
 ---
 
-### How to Enforce Peer Authentication (Example Walkthrough)
+---
 
-- Start with your app running (e.g., the BookInfo sample).
+# 🔐 Enforcing Peer Authentication in Istio with mTLS
 
-- Create a new namespace `bar` and deploy a simple curl pod to send requests.
+## 🎯 Objective
 
-- Test communication from the `bar` namespace to BookInfo’s product page service:
-
-  - Initially, you get a **200 OK**, meaning communication works across namespaces without restriction.
-
-- Apply a **PeerAuthentication** policy in the BookInfo namespace in **STRICT mode**:
-
-  - This policy enforces that only **mTLS encrypted traffic** is accepted by services in BookInfo.
-  - Once applied, retry the curl request from the `bar` namespace.
-
-- Result:
-
-  - The request **fails with "connection reset by peer"** error.
-  - This happens because the `bar` namespace does **not have mTLS enabled**, so its requests are rejected.
-  - This shows Istio is enforcing secure communication strictly within the BookInfo namespace.
+Demonstrate how **Istio PeerAuthentication** in `STRICT` mode blocks non-mTLS traffic — ensuring that only **encrypted, secure service-to-service communication** is allowed.
 
 ---
 
-### Applying mTLS Globally
+## 🧪 Step-by-Step Walkthrough
 
-- You can apply the same **PeerAuthentication** policy at the **mesh-wide level** by creating it in the `istio-system` namespace.
-- This enforces **mTLS across all namespaces and services** in the mesh.
+### ✅ 1. Confirm BookInfo Pods Are Running
+
+```bash
+kubectl get pods -n bookinfo
+```
+
+Ensure that the **BookInfo** sample app (e.g., `productpage`, `reviews`, etc.) is up and running.
+
+---
+
+### 📦 2. Deploy a Curl Test Client in a New Namespace (`bar`)
+
+```bash
+kubectl create ns bar
+kubectl apply -f curl.yaml -n bar
+```
+
+> This deploys a minimal curl container in the `bar` namespace to simulate cross-namespace traffic.
+
+You can verify:
+
+```bash
+kubectl get pods -n bar
+```
+
+---
+
+### 📡 3. Send a Request (Without mTLS) from `bar` to BookInfo
+
+```bash
+kubectl exec -n bar -it $(kubectl get pod -n bar -l app=curl -o jsonpath='{.items[0].metadata.name}') \
+-- curl -s -o /dev/null -w "%{http_code}\n" http://productpage.bookinfo:9080
+```
+
+✅ **Expected result:**
+You should see `200 OK` — this confirms that communication across namespaces **without mTLS** works by default.
+
+---
+
+### 🔐 4. Apply Peer Authentication Policy (mTLS STRICT) to `bookinfo`
+
+```bash
+kubectl apply -f peerAuthentication.yaml
+```
+
+**`peerAuthentication.yaml`:**
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: bookinfo-peer-auth
+  namespace: bookinfo
+spec:
+  mtls:
+    mode: STRICT
+```
+
+🧠 This policy **enforces mTLS strictly** — meaning BookInfo services will **reject all plaintext traffic**, including from other namespaces like `bar`.
+
+---
+
+### ❌ 5. Re-run the Curl Request (Now It Fails)
+
+```bash
+kubectl exec -n bar -it $(kubectl get pod -n bar -l app=curl -o jsonpath='{.items[0].metadata.name}') \
+-- curl -s -o /dev/null -w "%{http_code}\n" http://productpage.bookinfo:9080
+```
+
+🚫 **Expected result:**
+The request fails with:
+
+```
+curl: (56) Recv failure: Connection reset by peer
+command terminated with exit code 56
+```
+
+🔎 Explanation:
+
+- The `bar` namespace does **not inject Istio sidecar proxies**, so its traffic is not mTLS-encrypted.
+- The BookInfo services **reject the request** due to the `STRICT` mTLS mode.
+
+---
+
+## 🌐 Optional: Apply Cluster-Wide Peer Authentication
+
+To **enforce mTLS across the entire mesh**, apply this in the `istio-system` namespace:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT
+```
+
+```bash
+kubectl apply -f peerAuthentication-clusterwide.yaml
+```
+
+This ensures **all traffic** between services — across **all namespaces** — must use mTLS.
+
+---
+
+## 📁 Supporting Files
+
+### `curl.yaml`
+
+Minimal curl client to simulate cross-namespace requests:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: curl
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: curl
+  labels:
+    app: curl
+    service: curl
+spec:
+  ports:
+    - port: 80
+      name: http
+  selector:
+    app: curl
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curl
+  template:
+    metadata:
+      labels:
+        app: curl
+    spec:
+      terminationGracePeriodSeconds: 0
+      serviceAccountName: curl
+      containers:
+        - name: curl
+          image: curlimages/curl
+          command: ['/bin/sleep', 'infinity']
+          imagePullPolicy: IfNotPresent
+```
+
+---
+
+## ✅ Summary
+
+| Scenario                            | Result    | Why                               |
+| ----------------------------------- | --------- | --------------------------------- |
+| Curl request without mTLS (default) | ✅ 200 OK | No restrictions in place          |
+| After applying mTLS STRICT policy   | ❌ 56     | Plaintext traffic is rejected     |
+| Enable mTLS in `bar` namespace      | ✅        | If Istio sidecar is injected      |
+| Cluster-wide STRICT mode            | ✅/❌     | Enforces mesh-wide secure traffic |
 
 ---
 
@@ -2029,46 +2180,122 @@ Istio allows you to define **authorization policies** that specify who can call 
 
 ---
 
-### Walkthrough: Implementing Authorization Policies
+---
 
-#### Step 1: Layer 4 Authorization Policy
+## 🔐 Walkthrough: Implementing Istio Authorization Policies
 
-- Define a policy that applies to all pods labeled `app: productpage`.
-- Only allow requests from the **Istio Ingress Gateway's service account**.
-- When tested:
-
-  - Access via browser or allowed ingress works fine.
-  - Requests from other sources (like a `curl` pod in the `bar` namespace with a different service account) are denied.
-
-#### Step 2: Layer 7 Authorization Policy
-
-- Requires **Envoy (Waypoint) proxy** configured to handle layer 7 traffic.
-- Define a policy that:
-
-  - Allows only **GET methods** from the `curl` pod’s service account in the `bar` namespace.
-
-- When tested:
-
-  - DELETE requests from the `curl` pod to product page are **denied (method not allowed)**.
-  - GET requests succeed.
-  - Access from unauthorized pods (e.g., review pod) are denied.
+In this walkthrough, we’ll secure access to the `productpage` service in the **Bookinfo application** using **Istio Authorization Policies**, implementing both **Layer 4 (L4)** and **Layer 7 (L7)** controls.
 
 ---
 
-### Benefits Demonstrated
+### ✅ Step 1: Layer 4 (L4) Authorization Policy
 
-- Authorization policies enforce **who can access a service (L4)** and **what operations they can perform (L7)**.
-- They protect your services by preventing unauthorized or potentially harmful actions, even after authentication.
-- You get detailed control and visibility, which you can monitor via tools like **Kiali dashboard** to see authorized traffic flow.
+#### 🎯 Objective:
+
+Restrict **any access** to the `productpage` pods **unless** it's from the **Istio Ingress Gateway's service account**.
+
+#### 🛠️ Configuration:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: productpage-viewer
+  namespace: bookinfo
+spec:
+  selector:
+    matchLabels:
+      app: productpage
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/istio-ingress/sa/istio-ingressgateway
+```
+
+```bash
+kubectl apply f k8s/L4-productpage.yaml
+kubectl get pods -n bar
+kubectl exec deploy/curl -n bar --curl "http://productpage.bookinfo:9080/productpage"
+```
+
+#### 🔍 Expected Behavior:
+
+- ✅ Access via browser or through the Ingress Gateway works as expected.
+- ❌ Access from unauthorized sources (e.g., a `curl` pod in the `bar` namespace) is **denied**.
+
+#### 📦 Test Results:
+
+- **`curl` from unauthorized pod** → ❌ Access Denied
+- **Browser access via Ingress** → ✅ Access Granted
 
 ---
 
-### Summary
+### ✅ Step 2: Layer 7 (L7) Authorization Policy
 
-| Aspect                    | Description                                      | Example Policy Scope                                    |
-| ------------------------- | ------------------------------------------------ | ------------------------------------------------------- |
-| **Layer 4 Authorization** | Controls service-to-service communication access | Only allow ingress gateway to product page pods         |
-| **Layer 7 Authorization** | Controls allowed HTTP methods, paths, etc.       | Only allow GET requests from `curl` pod service account |
+> 💡 L7 policies require **Envoy Waypoint Proxy** to enforce HTTP-level rules (e.g., allowed HTTP methods).
+
+#### 🎯 Objective:
+
+Allow **only `GET` requests** from a specific workload identity (i.e., `curl` pod in `bar` namespace).
+
+#### 🛠️ Configuration:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: productpage-viewer
+  namespace: bookinfo
+spec:
+  targetRefs:
+    - kind: Service
+      group: ''
+      name: productpage
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - cluster.local/ns/bar/sa/curl
+      to:
+        - operation:
+            methods: ['GET']
+```
+
+```bash
+kubectl get gateway  -n bookInfo
+kubectl apply f k8s/L7-product-page.yaml
+kubectl get pods -n bar
+```
+
+#### 🔍 Expected Behavior:
+
+- ✅ `GET` from `curl` pod (namespace `bar`) → **Allowed**
+- ❌ `DELETE` or other HTTP methods → **Denied**
+- ❌ Requests from other pods (e.g., `reviews`) → **Denied**
+
+#### 📦 Test Results:
+
+- **`curl -X DELETE` from curl pod** → ❌ `Method Not Allowed`
+- **`curl -X GET` from curl pod** → ✅ Success
+- **Access from reviews pod** → ❌ Access Denied
+
+---
+
+### 📌 Notes:
+
+- **Waypoint Proxy Check**: Before applying L7 policies, verify that the **Waypoint Proxy** is running and programmed (`status.programmed: true`).
+- **Policy Scoping**: L4 policies operate at the TCP level (before HTTP parsing), while L7 policies enforce fine-grained controls like HTTP verbs.
+
+---
+
+### 🧠 Summary:
+
+- 🧱 L4 policy secured `productpage` from all workloads **except** the Ingress Gateway.
+- 📡 L7 policy enforced **method-level** access (`GET` only) from a specific workload identity.
+- ✅ Kiali can be used to visualize and confirm that **only authorized traffic** is flowing to your services.
 
 ---
 
@@ -2111,6 +2338,10 @@ You can generate your own **Root CA and Intermediate CA certificates** for Istio
 #### Step-by-Step Process:
 
 1. **Create a directory** to store your certificates and switch to it.
+   `mkdir ca-cert`
+   `cd ca-certs`
+   `make -f ..k8s//tools/certs/Makefile.selfsigned.mk root-ca`
+   `ls`
 
 2. **Generate the Root CA certificate and key**
 
@@ -2124,6 +2355,8 @@ You can generate your own **Root CA and Intermediate CA certificates** for Istio
 3. **Generate an Intermediate CA certificate and key**
 
    - Use the root CA to sign the intermediate CA (e.g., named `istio-cluster`) to avoid using the root CA directly, which is a best practice.
+     `make -f ../tools/certs/Makefile.selfsigned.mk istio-cluster-cacerts`
+     `cd istio-cluster`
 
 4. **Create a Kubernetes secret in the `istio-system` namespace** with these certificates:
 
@@ -2140,8 +2373,12 @@ You can generate your own **Root CA and Intermediate CA certificates** for Istio
 
    - Either delete your existing Istio installation and redeploy, or start a fresh cluster and install Istio.
    - Use a script or Istioctl to deploy Istio and your sample apps (like Bookinfo).
+     `./install.sh`
 
 6. **Label your application namespaces** with `istio.io/dataplane-mode=ambient` to enable ambient mode proxying.
+   `kubectl get pods -n bookinfo`
+   `kubectl label namespace bookInfo istio.io/dataplane-mode=ambient`
+   `curl http://localhost:80/productpage`
 
 ---
 
@@ -2149,17 +2386,32 @@ You can generate your own **Root CA and Intermediate CA certificates** for Istio
 
 - Check the **Ztunnel pod** which holds the certificates in ambient mode.
 
+`kubectl get pods -n istio-system`
+
 - Use Istioctl to inspect certificates:
 
   ```bash
   istioctl ztunnel-config certificate <ztunnel-pod-name> -n <namespace>
+
+  or
+
+    istioctl ztunnel-config certificate <ztunnel-pod-name>.istio-system>
   ```
 
 - Extract and compare the certificates inside Ztunnel with the certificates you created locally using:
 
   ```bash
-  diff -s <local-cert-file> <extracted-ztunnel-cert-file>
+  istioctl ztunnel-config certificate ztunnel-h8581.istio-system -o json jq -r '.[0].certChain[0].pem' | base64 -d openssl x509 -text - nout > ztunnel-cert;crt.txt
   ```
+
+```
+x509 -in ca-certs/istio-cluster/root-cert.pem > root-cert.crt.txt
+
+diff -s root-cert.txt ztunnel-cert.crt.txt
+diff -s ca-cert.txt ztunnel.crt.txt
+```
+
+compare
 
 - Matching files confirm that Istio is using your custom Root CA and certificates correctly.
 
@@ -2288,8 +2540,17 @@ Together, these metrics give you a **clear picture of your system’s performanc
 
    If it’s not running, install it using the provided manifests (`prometheus.yaml`).
 
+   kubectl apply -f prometheus.yaml -n istio-system
+
 2. **Generate traffic:**
    Run a command to generate load on your BookInfo app, so metrics start flowing.
+
+   ```bash
+   for i in $(seq 1 100); do
+   curl -s http://localhost:productpage
+   done
+
+   ```
 
 3. **Access Prometheus UI:**
    Use Istioctl to open Prometheus:
@@ -2297,6 +2558,8 @@ Together, these metrics give you a **clear picture of your system’s performanc
    ```bash
    istioctl dashboard prometheus
    ```
+
+````
 
 4. **Query metrics:**
    Example queries include:
@@ -2316,13 +2579,13 @@ Together, these metrics give you a **clear picture of your system’s performanc
    - Requests to reviews service version 3:
 
      ```
-     istio_requests_total{destination_version="v3"}
+       istio_requests_total{destination_service="reviews.bookinfo.svc.cluster.local",destination_version="v3"}
      ```
 
-   - Request rate over 5 minutes:
+   - Request rate over 5 minutes in products page:
 
      ```
-     rate(istio_requests_total[5m])
+     rate(istio_requests_total{destination_service="productpage.*", response_code="200"}[5m])
      ```
 
 ---
@@ -2389,6 +2652,7 @@ Together, these metrics give you a **clear picture of your system’s performanc
    - Clean up old tracing configs by setting tracing to the MT (multi-tenant) config.
    - Configure the tracing provider in the extension provider section to point to Jaeger via OpenTelemetry.
 
+
 2. **Enable telemetry:**
 
    - Make sure telemetry is enabled (`enabled: true`) so Istio collects both metrics and tracing data for full visibility.
@@ -2403,6 +2667,38 @@ Together, these metrics give you a **clear picture of your system’s performanc
    - Deploy Jaeger to listen for incoming trace data from Istio.
    - Modify `telemetry.yaml` to send all traces to the Jaeger collector.
 
+
+
+```bash
+kubectl get pods -n istio-system  # to confirm is istiod is running
+
+helm upgrade istio/istiod -n istio-system --set profile-ambient --wait --values k8s/monitorting//tracing/tracing-values.yaml
+
+kubectl apply -f k8s/monitorting//tracing/telemetry.yaml
+
+```
+
+   ```bash
+   for i in $(seq 1 100); do
+   curl -s http://localhost:productpage
+   done
+
+   ```
+
+Apply delay and tracse the delay with jaeger
+
+   ```bash
+   kubectl apply -f  k8s/monitorting//tracing/delay.yamml -n bookInfo
+   ```
+
+
+
+      ```bash
+   for i in $(seq 1 100); do
+   curl -s http://localhost:productpage
+   done
+
+   ```
 ---
 
 ### Using Jaeger to Visualize Traces
@@ -2579,3 +2875,4 @@ This demonstrates how distributed tracing helps you quickly identify and diagnos
 - The more you use Kiali, the easier it becomes to manage and troubleshoot complex microservice architectures.
 
 ---
+````
